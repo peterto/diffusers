@@ -235,6 +235,55 @@ images = pipeline(prompt_ids, params, prng_seed, num_inference_steps, jit=True).
 images = pipeline.numpy_to_pil(np.asarray(images.reshape((num_samples,) + images.shape[-3:])))
 ```
 
+Diffusers also has a Image-to-Image generation pipeline with Flax/Jax
+```python
+import jax
+import numpy as np
+import jax.numpy as jnp
+from flax.jax_utils import replicate
+from flax.training.common_utils import shard
+import requests
+from io import BytesIO
+from PIL import Image
+from diffusers import FlaxStableDiffusionImg2ImgPipeline
+
+def create_key(seed=0):
+    return jax.random.PRNGKey(seed)
+rng = create_key(0)
+
+url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+response = requests.get(url)
+init_img = Image.open(BytesIO(response.content)).convert("RGB")
+init_img = init_img.resize((768, 512))
+
+prompts = "A fantasy landscape, trending on artstation"
+
+pipeline, params = FlaxStableDiffusionImg2ImgPipeline.from_pretrained(
+    "CompVis/stable-diffusion-v1-4", revision="flax",
+    dtype=jnp.bfloat16,
+)
+
+num_samples = jax.device_count()
+rng = jax.random.split(rng, jax.device_count())
+prompt_ids, processed_image = pipeline.prepare_inputs(prompt=[prompts]*num_samples, image = [init_img]*num_samples)
+p_params = replicate(params)
+prompt_ids = shard(prompt_ids)
+processed_image = shard(processed_image)
+
+output = pipeline(
+    prompt_ids=prompt_ids, 
+    image=processed_image, 
+    params=p_params, 
+    prng_seed=rng, 
+    strength=0.75, 
+    num_inference_steps=50, 
+    jit=True, 
+    height=512,
+    width=768).images
+
+output_images = pipeline.numpy_to_pil(np.asarray(output.reshape((num_samples,) + output.shape[-3:])))
+```
+
 ### Image-to-Image text-guided generation with Stable Diffusion
 
 The `StableDiffusionImg2ImgPipeline` lets you pass a text prompt and an initial image to condition the generation of new images.
@@ -302,11 +351,8 @@ image = pipe(prompt=prompt, image=init_image, mask_image=mask_image).images[0]
 
 ### Tweak prompts reusing seeds and latents
 
-You can generate your own latents to reproduce results, or tweak your prompt on a specific result you liked. [This notebook](https://github.com/pcuenca/diffusers-examples/blob/main/notebooks/stable-diffusion-seeds.ipynb) shows how to do it step by step. You can also run it in Google Colab [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pcuenca/diffusers-examples/blob/main/notebooks/stable-diffusion-seeds.ipynb).
-
-
-For more details, check out [the Stable Diffusion notebook](https://colab.research.google.com/github/huggingface/notebooks/blob/main/diffusers/stable_diffusion.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/diffusers/stable_diffusion.ipynb)
-and have a look into the [release notes](https://github.com/huggingface/diffusers/releases/tag/v0.2.0).
+You can generate your own latents to reproduce results, or tweak your prompt on a specific result you liked.
+Please have a look at [Reusing seeds for deterministic generation](https://huggingface.co/docs/diffusers/main/en/using-diffusers/reusing_seeds).
 
 ## Fine-Tuning Stable Diffusion
 
