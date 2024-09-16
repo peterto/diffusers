@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2024 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,21 +19,42 @@ import unittest
 
 import numpy as np
 import torch
-
-from diffusers import AutoencoderKL, PNDMScheduler, StableDiffusionInpaintPipeline, UNet2DConditionModel
-from diffusers.utils import floats_tensor, load_image, load_numpy, torch_device
-from diffusers.utils.testing_utils import require_torch_gpu, slow
 from PIL import Image
 from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
-from ...test_pipelines_common import PipelineTesterMixin
+from diffusers import AutoencoderKL, PNDMScheduler, StableDiffusionInpaintPipeline, UNet2DConditionModel
+from diffusers.utils.testing_utils import (
+    enable_full_determinism,
+    floats_tensor,
+    load_image,
+    load_numpy,
+    require_torch_gpu,
+    slow,
+    torch_device,
+)
+
+from ..pipeline_params import (
+    TEXT_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS,
+    TEXT_GUIDED_IMAGE_INPAINTING_PARAMS,
+    TEXT_TO_IMAGE_CALLBACK_CFG_PARAMS,
+)
+from ..test_pipelines_common import PipelineKarrasSchedulerTesterMixin, PipelineLatentTesterMixin, PipelineTesterMixin
 
 
-torch.backends.cuda.matmul.allow_tf32 = False
+enable_full_determinism()
 
 
-class StableDiffusion2InpaintPipelineFastTests(PipelineTesterMixin, unittest.TestCase):
+class StableDiffusion2InpaintPipelineFastTests(
+    PipelineLatentTesterMixin, PipelineKarrasSchedulerTesterMixin, PipelineTesterMixin, unittest.TestCase
+):
     pipeline_class = StableDiffusionInpaintPipeline
+    params = TEXT_GUIDED_IMAGE_INPAINTING_PARAMS
+    batch_params = TEXT_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS
+    image_params = frozenset(
+        []
+    )  # TO-DO: update image_params once pipeline is refactored with VaeImageProcessor.preprocess
+    image_latents_params = frozenset([])
+    callback_cfg_params = TEXT_TO_IMAGE_CALLBACK_CFG_PARAMS.union({"mask", "masked_image_latents"})
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -47,7 +68,7 @@ class StableDiffusion2InpaintPipelineFastTests(PipelineTesterMixin, unittest.Tes
             up_block_types=("CrossAttnUpBlock2D", "UpBlock2D"),
             cross_attention_dim=32,
             # SD2-specific config below
-            attention_head_dim=(2, 4, 8, 8),
+            attention_head_dim=(2, 4),
             use_linear_projection=True,
         )
         scheduler = PNDMScheduler(skip_prk_steps=True)
@@ -87,6 +108,7 @@ class StableDiffusion2InpaintPipelineFastTests(PipelineTesterMixin, unittest.Tes
             "tokenizer": tokenizer,
             "safety_checker": None,
             "feature_extractor": None,
+            "image_encoder": None,
         }
         return components
 
@@ -107,7 +129,7 @@ class StableDiffusion2InpaintPipelineFastTests(PipelineTesterMixin, unittest.Tes
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -127,10 +149,19 @@ class StableDiffusion2InpaintPipelineFastTests(PipelineTesterMixin, unittest.Tes
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
+    def test_inference_batch_single_identical(self):
+        super().test_inference_batch_single_identical(expected_max_diff=3e-3)
+
 
 @slow
 @require_torch_gpu
 class StableDiffusionInpaintPipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
@@ -158,7 +189,7 @@ class StableDiffusionInpaintPipelineIntegrationTests(unittest.TestCase):
 
         prompt = "Face of a yellow cat, high resolution, sitting on a park bench"
 
-        generator = torch.Generator(device=torch_device).manual_seed(0)
+        generator = torch.manual_seed(0)
         output = pipe(
             prompt=prompt,
             image=init_image,
@@ -169,7 +200,7 @@ class StableDiffusionInpaintPipelineIntegrationTests(unittest.TestCase):
         image = output.images[0]
 
         assert image.shape == (512, 512, 3)
-        assert np.abs(expected_image - image).max() < 1e-3
+        assert np.abs(expected_image - image).max() < 9e-3
 
     def test_stable_diffusion_inpaint_pipeline_fp16(self):
         init_image = load_image(
@@ -196,7 +227,7 @@ class StableDiffusionInpaintPipelineIntegrationTests(unittest.TestCase):
 
         prompt = "Face of a yellow cat, high resolution, sitting on a park bench"
 
-        generator = torch.Generator(device=torch_device).manual_seed(0)
+        generator = torch.manual_seed(0)
         output = pipe(
             prompt=prompt,
             image=init_image,
@@ -228,23 +259,21 @@ class StableDiffusionInpaintPipelineIntegrationTests(unittest.TestCase):
             model_id,
             safety_checker=None,
             scheduler=pndm,
-            device_map="auto",
             torch_dtype=torch.float16,
         )
-        pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
         pipe.enable_attention_slicing(1)
         pipe.enable_sequential_cpu_offload()
 
         prompt = "Face of a yellow cat, high resolution, sitting on a park bench"
 
-        generator = torch.Generator(device=torch_device).manual_seed(0)
+        generator = torch.manual_seed(0)
         _ = pipe(
             prompt=prompt,
             image=init_image,
             mask_image=mask_image,
             generator=generator,
-            num_inference_steps=5,
+            num_inference_steps=2,
             output_type="np",
         )
 

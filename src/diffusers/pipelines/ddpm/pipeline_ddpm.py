@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,22 +17,26 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
-from ...configuration_utils import FrozenDict
-from ...pipeline_utils import DiffusionPipeline, ImagePipelineOutput
-from ...utils import deprecate
+from ...utils.torch_utils import randn_tensor
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 class DDPMPipeline(DiffusionPipeline):
     r"""
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
-    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
+    Pipeline for image generation.
+
+    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
+    implemented for all pipelines (downloading, saving, running on a particular device, etc.).
 
     Parameters:
-        unet ([`UNet2DModel`]): U-Net architecture to denoise the encoded image.
+        unet ([`UNet2DModel`]):
+            A `UNet2DModel` to denoise the encoded image latents.
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image. Can be one of
             [`DDPMScheduler`], or [`DDIMScheduler`].
     """
+
+    model_cpu_offload_seq = "unet"
 
     def __init__(self, unet, scheduler):
         super().__init__()
@@ -46,65 +50,61 @@ class DDPMPipeline(DiffusionPipeline):
         num_inference_steps: int = 1000,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        **kwargs,
     ) -> Union[ImagePipelineOutput, Tuple]:
         r"""
+        The call function to the pipeline for generation.
+
         Args:
             batch_size (`int`, *optional*, defaults to 1):
                 The number of images to generate.
             generator (`torch.Generator`, *optional*):
-                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
-                to make generation deterministic.
+                A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
+                generation deterministic.
             num_inference_steps (`int`, *optional*, defaults to 1000):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
             output_type (`str`, *optional*, defaults to `"pil"`):
-                The output format of the generate image. Choose between
-                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+                The output format of the generated image. Choose between `PIL.Image` or `np.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipeline_utils.ImagePipelineOutput`] instead of a plain tuple.
+                Whether or not to return a [`~pipelines.ImagePipelineOutput`] instead of a plain tuple.
+
+        Example:
+
+        ```py
+        >>> from diffusers import DDPMPipeline
+
+        >>> # load model and scheduler
+        >>> pipe = DDPMPipeline.from_pretrained("google/ddpm-cat-256")
+
+        >>> # run pipeline in inference (sample random noise and denoise)
+        >>> image = pipe().images[0]
+
+        >>> # save image
+        >>> image.save("ddpm_generated_image.png")
+        ```
 
         Returns:
-            [`~pipeline_utils.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if
-            `return_dict` is True, otherwise a `tuple. When returning a tuple, the first element is a list with the
-            generated images.
+            [`~pipelines.ImagePipelineOutput`] or `tuple`:
+                If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
+                returned where the first element is a list with the generated images
         """
-        message = (
-            "Please make sure to instantiate your scheduler with `prediction_type` instead. E.g. `scheduler ="
-            " DDPMScheduler.from_pretrained(<model_id>, prediction_type='epsilon')`."
-        )
-        predict_epsilon = deprecate("predict_epsilon", "0.13.0", message, take_from=kwargs)
-
-        if predict_epsilon is not None:
-            new_config = dict(self.scheduler.config)
-            new_config["prediction_type"] = "epsilon" if predict_epsilon else "sample"
-            self.scheduler._internal_dict = FrozenDict(new_config)
-
-        if generator is not None and generator.device.type != self.device.type and self.device.type != "mps":
-            message = (
-                f"The `generator` device is `{generator.device}` and does not match the pipeline "
-                f"device `{self.device}`, so the `generator` will be ignored. "
-                f'Please use `torch.Generator(device="{self.device}")` instead.'
-            )
-            deprecate(
-                "generator.device == 'cpu'",
-                "0.13.0",
-                message,
-            )
-            generator = None
-
         # Sample gaussian noise to begin loop
-        if isinstance(self.unet.sample_size, int):
-            image_shape = (batch_size, self.unet.in_channels, self.unet.sample_size, self.unet.sample_size)
+        if isinstance(self.unet.config.sample_size, int):
+            image_shape = (
+                batch_size,
+                self.unet.config.in_channels,
+                self.unet.config.sample_size,
+                self.unet.config.sample_size,
+            )
         else:
-            image_shape = (batch_size, self.unet.in_channels, *self.unet.sample_size)
+            image_shape = (batch_size, self.unet.config.in_channels, *self.unet.config.sample_size)
 
         if self.device.type == "mps":
             # randn does not work reproducibly on mps
-            image = torch.randn(image_shape, generator=generator)
+            image = randn_tensor(image_shape, generator=generator)
             image = image.to(self.device)
         else:
-            image = torch.randn(image_shape, generator=generator, device=self.device)
+            image = randn_tensor(image_shape, generator=generator, device=self.device)
 
         # set step values
         self.scheduler.set_timesteps(num_inference_steps)

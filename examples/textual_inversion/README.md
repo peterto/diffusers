@@ -3,9 +3,9 @@
 [Textual inversion](https://arxiv.org/abs/2208.01618) is a method to personalize text2image models like stable diffusion on your own images using just 3-5 examples.
 The `textual_inversion.py` script shows how to implement the training procedure and adapt it for stable diffusion.
 
-## Running on Colab 
+## Running on Colab
 
-Colab for training 
+Colab for training
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/huggingface/notebooks/blob/main/diffusers/sd_textual_inversion_training.ipynb)
 
 Colab for inference
@@ -25,60 +25,78 @@ cd diffusers
 pip install .
 ```
 
-Then cd in the example folder  and run
+Then cd in the example folder and run:
 ```bash
 pip install -r requirements.txt
 ```
 
-And initialize an [🤗Accelerate](https://github.com/huggingface/accelerate/) environment with:
+And initialize an [🤗 Accelerate](https://github.com/huggingface/accelerate/) environment with:
 
 ```bash
 accelerate config
 ```
 
-
 ### Cat toy example
 
-You need to accept the model license before downloading or using the weights. In this example we'll use model version `v1-5`, so you'll need to visit [its card](https://huggingface.co/runwayml/stable-diffusion-v1-5), read the license and tick the checkbox if you agree. 
-
-You have to be a registered user in 🤗 Hugging Face Hub, and you'll also need to use an access token for the code to work. For more information on access tokens, please refer to [this section of the documentation](https://huggingface.co/docs/hub/security-tokens).
-
-Run the following command to authenticate your token
+First, let's login so that we can upload the checkpoint to the Hub during training:
 
 ```bash
 huggingface-cli login
 ```
 
-If you have already cloned the repo, then you won't need to go through these steps. 
+Now let's get our dataset. For this example we will use some cat images: https://huggingface.co/datasets/diffusers/cat_toy_example .
 
-<br>
+Let's first download it locally:
 
-Now let's get our dataset.Download 3-4 images from [here](https://drive.google.com/drive/folders/1fmJMs25nxS_rSNqS5hTcRdLem_YQXbq5) and save them in a directory. This will be our training data.
+```py
+from huggingface_hub import snapshot_download
 
-And launch the training using
+local_dir = "./cat"
+snapshot_download("diffusers/cat_toy_example", local_dir=local_dir, repo_type="dataset", ignore_patterns=".gitattributes")
+```
+
+This will be our training data.
+Now we can launch the training using:
 
 **___Note: Change the `resolution` to 768 if you are using the [stable-diffusion-2](https://huggingface.co/stabilityai/stable-diffusion-2) 768x768 model.___**
 
+**___Note: Please follow the [README_sdxl.md](./README_sdxl.md) if you are using the [stable-diffusion-xl](https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0).___**
+
 ```bash
-export MODEL_NAME="runwayml/stable-diffusion-v1-5"
-export DATA_DIR="path-to-dir-containing-images"
+export MODEL_NAME="stable-diffusion-v1-5/stable-diffusion-v1-5"
+export DATA_DIR="./cat"
 
 accelerate launch textual_inversion.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_DIR \
   --learnable_property="object" \
-  --placeholder_token="<cat-toy>" --initializer_token="toy" \
+  --placeholder_token="<cat-toy>" \
+  --initializer_token="toy" \
   --resolution=512 \
   --train_batch_size=1 \
   --gradient_accumulation_steps=4 \
   --max_train_steps=3000 \
-  --learning_rate=5.0e-04 --scale_lr \
+  --learning_rate=5.0e-04 \
+  --scale_lr \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
+  --push_to_hub \
   --output_dir="textual_inversion_cat"
 ```
 
 A full training run takes ~1 hour on one V100 GPU.
+
+**Note**: As described in [the official paper](https://arxiv.org/abs/2208.01618)
+only one embedding vector is used for the placeholder token, *e.g.* `"<cat-toy>"`.
+However, one can also add multiple embedding vectors for the placeholder token
+to increase the number of fine-tuneable parameters. This can help the model to learn
+more complex details. To use multiple embedding vectors, you should define `--num_vectors`
+to a number larger than one, *e.g.*:
+```bash
+--num_vectors 5
+```
+
+The saved textual inversion vectors will then be larger in size compared to the default case.
 
 ### Inference
 
@@ -86,9 +104,13 @@ Once you have trained a model using above command, the inference can be done sim
 
 ```python
 from diffusers import StableDiffusionPipeline
+import torch
 
 model_id = "path-to-your-trained-model"
 pipe = StableDiffusionPipeline.from_pretrained(model_id,torch_dtype=torch.float16).to("cuda")
+
+repo_id_embeds = "path-to-your-learned-embeds"
+pipe.load_textual_inversion(repo_id_embeds)
 
 prompt = "A <cat-toy> backpack"
 
@@ -116,11 +138,13 @@ python textual_inversion_flax.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --train_data_dir=$DATA_DIR \
   --learnable_property="object" \
-  --placeholder_token="<cat-toy>" --initializer_token="toy" \
+  --placeholder_token="<cat-toy>" \
+  --initializer_token="toy" \
   --resolution=512 \
   --train_batch_size=1 \
   --max_train_steps=3000 \
-  --learning_rate=5.0e-04 --scale_lr \
+  --learning_rate=5.0e-04 \
+  --scale_lr \
   --output_dir="textual_inversion_cat"
 ```
 It should be at least 70% faster than the PyTorch script with the same configuration.

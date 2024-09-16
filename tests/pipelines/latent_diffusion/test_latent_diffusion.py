@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2024 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,20 +18,38 @@ import unittest
 
 import numpy as np
 import torch
-
-from diffusers import AutoencoderKL, DDIMScheduler, LDMTextToImagePipeline, UNet2DConditionModel
-from diffusers.utils.testing_utils import load_numpy, nightly, require_torch_gpu, slow, torch_device
 from transformers import CLIPTextConfig, CLIPTextModel, CLIPTokenizer
 
-from ...test_pipelines_common import PipelineTesterMixin
+from diffusers import AutoencoderKL, DDIMScheduler, LDMTextToImagePipeline, UNet2DConditionModel
+from diffusers.utils.testing_utils import (
+    enable_full_determinism,
+    load_numpy,
+    nightly,
+    require_torch_gpu,
+    torch_device,
+)
+
+from ..pipeline_params import TEXT_TO_IMAGE_BATCH_PARAMS, TEXT_TO_IMAGE_PARAMS
+from ..test_pipelines_common import PipelineTesterMixin
 
 
-torch.backends.cuda.matmul.allow_tf32 = False
+enable_full_determinism()
 
 
 class LDMTextToImagePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     pipeline_class = LDMTextToImagePipeline
-    test_cpu_offload = False
+    params = TEXT_TO_IMAGE_PARAMS - {
+        "negative_prompt",
+        "negative_prompt_embeds",
+        "cross_attention_kwargs",
+        "prompt_embeds",
+    }
+    required_optional_params = PipelineTesterMixin.required_optional_params - {
+        "num_images_per_prompt",
+        "callback",
+        "callback_steps",
+    }
+    batch_params = TEXT_TO_IMAGE_BATCH_PARAMS
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -95,7 +113,7 @@ class LDMTextToImagePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -112,21 +130,26 @@ class LDMTextToImagePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 16, 16, 3)
-        expected_slice = np.array([0.59450, 0.64078, 0.55509, 0.51229, 0.69640, 0.36960, 0.59296, 0.60801, 0.49332])
+        expected_slice = np.array([0.6101, 0.6156, 0.5622, 0.4895, 0.6661, 0.3804, 0.5748, 0.6136, 0.5014])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-3
 
 
-@slow
+@nightly
 @require_torch_gpu
 class LDMTextToImagePipelineSlowTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
         torch.cuda.empty_cache()
 
     def get_inputs(self, device, dtype=torch.float32, seed=0):
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator = torch.manual_seed(seed)
         latents = np.random.RandomState(seed).standard_normal((1, 4, 32, 32))
         latents = torch.from_numpy(latents).to(device=device, dtype=dtype)
         inputs = {
@@ -135,7 +158,7 @@ class LDMTextToImagePipelineSlowTests(unittest.TestCase):
             "generator": generator,
             "num_inference_steps": 3,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -156,13 +179,18 @@ class LDMTextToImagePipelineSlowTests(unittest.TestCase):
 @nightly
 @require_torch_gpu
 class LDMTextToImagePipelineNightlyTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         super().tearDown()
         gc.collect()
         torch.cuda.empty_cache()
 
     def get_inputs(self, device, dtype=torch.float32, seed=0):
-        generator = torch.Generator(device=device).manual_seed(seed)
+        generator = torch.manual_seed(seed)
         latents = np.random.RandomState(seed).standard_normal((1, 4, 32, 32))
         latents = torch.from_numpy(latents).to(device=device, dtype=dtype)
         inputs = {
@@ -171,7 +199,7 @@ class LDMTextToImagePipelineNightlyTests(unittest.TestCase):
             "generator": generator,
             "num_inference_steps": 50,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 

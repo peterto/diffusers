@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 HuggingFace Inc.
+# Copyright 2024 HuggingFace Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,28 +19,32 @@ import unittest
 
 import numpy as np
 import torch
-
-from diffusers import AutoencoderKL, PaintByExamplePipeline, PNDMScheduler, UNet2DConditionModel
-from diffusers.pipelines.paint_by_example import PaintByExampleImageEncoder
-from diffusers.utils import floats_tensor, load_image, slow, torch_device
-from diffusers.utils.testing_utils import require_torch_gpu
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPVisionConfig
 
-from ...test_pipelines_common import PipelineTesterMixin
+from diffusers import AutoencoderKL, PaintByExamplePipeline, PNDMScheduler, UNet2DConditionModel
+from diffusers.pipelines.paint_by_example import PaintByExampleImageEncoder
+from diffusers.utils.testing_utils import (
+    enable_full_determinism,
+    floats_tensor,
+    load_image,
+    nightly,
+    require_torch_gpu,
+    torch_device,
+)
+
+from ..pipeline_params import IMAGE_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS, IMAGE_GUIDED_IMAGE_INPAINTING_PARAMS
+from ..test_pipelines_common import PipelineTesterMixin
 
 
-torch.backends.cuda.matmul.allow_tf32 = False
+enable_full_determinism()
 
 
 class PaintByExamplePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
     pipeline_class = PaintByExamplePipeline
-
-    def tearDown(self):
-        # clean up the VRAM after each test
-        super().tearDown()
-        gc.collect()
-        torch.cuda.empty_cache()
+    params = IMAGE_GUIDED_IMAGE_INPAINTING_PARAMS
+    batch_params = IMAGE_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS
+    image_params = frozenset([])  # TO_DO: update the image_prams once refactored VaeImageProcessor.preprocess
 
     def get_dummy_components(self):
         torch.manual_seed(0)
@@ -113,7 +117,7 @@ class PaintByExamplePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
             "generator": generator,
             "num_inference_steps": 2,
             "guidance_scale": 6.0,
-            "output_type": "numpy",
+            "output_type": "np",
         }
         return inputs
 
@@ -132,7 +136,7 @@ class PaintByExamplePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 64, 64, 3)
-        expected_slice = np.array([0.4397, 0.5553, 0.3802, 0.5222, 0.5811, 0.4342, 0.494, 0.4577, 0.4428])
+        expected_slice = np.array([0.4686, 0.5687, 0.4007, 0.5218, 0.5741, 0.4482, 0.4940, 0.4629, 0.4503])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
@@ -163,23 +167,19 @@ class PaintByExamplePipelineFastTests(PipelineTesterMixin, unittest.TestCase):
         assert out_1.shape == (1, 64, 64, 3)
         assert np.abs(out_1.flatten() - out_2.flatten()).max() < 5e-2
 
-    def test_paint_by_example_inpaint_with_num_images_per_prompt(self):
-        device = "cpu"
-        pipe = PaintByExamplePipeline(**self.get_dummy_components())
-        pipe = pipe.to(device)
-        pipe.set_progress_bar_config(disable=None)
-
-        inputs = self.get_dummy_inputs()
-
-        images = pipe(**inputs, num_images_per_prompt=2).images
-
-        # check if the output is a list of 2 images
-        assert len(images) == 2
+    def test_inference_batch_single_identical(self):
+        super().test_inference_batch_single_identical(expected_max_diff=3e-3)
 
 
-@slow
+@nightly
 @require_torch_gpu
 class PaintByExamplePipelineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        # clean up the VRAM before each test
+        super().setUp()
+        gc.collect()
+        torch.cuda.empty_cache()
+
     def tearDown(self):
         # clean up the VRAM after each test
         super().tearDown()
@@ -205,7 +205,7 @@ class PaintByExamplePipelineIntegrationTests(unittest.TestCase):
         pipe = pipe.to(torch_device)
         pipe.set_progress_bar_config(disable=None)
 
-        generator = torch.Generator(device=torch_device).manual_seed(321)
+        generator = torch.manual_seed(321)
         output = pipe(
             image=init_image,
             mask_image=mask_image,
@@ -221,7 +221,6 @@ class PaintByExamplePipelineIntegrationTests(unittest.TestCase):
         image_slice = image[0, -3:, -3:, -1]
 
         assert image.shape == (1, 512, 512, 3)
-        expected_slice = np.array(
-            [0.47455794, 0.47086594, 0.47683704, 0.51024145, 0.5064255, 0.5123164, 0.532502, 0.5328063, 0.5428694]
-        )
+        expected_slice = np.array([0.4834, 0.4811, 0.4874, 0.5122, 0.5081, 0.5144, 0.5291, 0.5290, 0.5374])
+
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2

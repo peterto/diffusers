@@ -2,6 +2,13 @@ import inspect
 from typing import Callable, List, Optional, Union
 
 import torch
+from transformers import (
+    CLIPImageProcessor,
+    CLIPTextModel,
+    CLIPTokenizer,
+    WhisperForConditionalGeneration,
+    WhisperProcessor,
+)
 
 from diffusers import (
     AutoencoderKL,
@@ -11,22 +18,16 @@ from diffusers import (
     PNDMScheduler,
     UNet2DConditionModel,
 )
+from diffusers.pipelines.pipeline_utils import StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.utils import logging
-from transformers import (
-    CLIPFeatureExtractor,
-    CLIPTextModel,
-    CLIPTokenizer,
-    WhisperForConditionalGeneration,
-    WhisperProcessor,
-)
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class SpeechToImagePipeline(DiffusionPipeline):
+class SpeechToImagePipeline(DiffusionPipeline, StableDiffusionMixin):
     def __init__(
         self,
         speech_model: WhisperForConditionalGeneration,
@@ -37,7 +38,7 @@ class SpeechToImagePipeline(DiffusionPipeline):
         unet: UNet2DConditionModel,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
         safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
 
@@ -62,14 +63,6 @@ class SpeechToImagePipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        if slice_size == "auto":
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        self.enable_attention_slicing(None)
-
     @torch.no_grad()
     def __call__(
         self,
@@ -83,11 +76,11 @@ class SpeechToImagePipeline(DiffusionPipeline):
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+        callback_steps: int = 1,
         **kwargs,
     ):
         inputs = self.speech_processor.feature_extractor(
@@ -190,7 +183,7 @@ class SpeechToImagePipeline(DiffusionPipeline):
         # Unlike in other pipelines, latents need to be generated in the target device
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
-        latents_shape = (batch_size * num_images_per_prompt, self.unet.in_channels, height // 8, width // 8)
+        latents_shape = (batch_size * num_images_per_prompt, self.unet.config.in_channels, height // 8, width // 8)
         latents_dtype = text_embeddings.dtype
         if latents is None:
             if self.device.type == "mps":
@@ -242,14 +235,15 @@ class SpeechToImagePipeline(DiffusionPipeline):
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
-                callback(i, t, latents)
+                step_idx = i // getattr(self.scheduler, "order", 1)
+                callback(step_idx, t, latents)
 
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if output_type == "pil":

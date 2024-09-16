@@ -1,4 +1,4 @@
-# Copyright 2022 Zhejiang University Team and The HuggingFace Team. All rights reserved.
+# Copyright 2024 Zhejiang University Team and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,8 +23,8 @@ import jax.numpy as jnp
 
 from ..configuration_utils import ConfigMixin, register_to_config
 from .scheduling_utils_flax import (
-    _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS,
     CommonSchedulerState,
+    FlaxKarrasDiffusionSchedulers,
     FlaxSchedulerMixin,
     FlaxSchedulerOutput,
     add_noise_common,
@@ -99,9 +99,7 @@ class FlaxPNDMScheduler(FlaxSchedulerMixin, ConfigMixin):
             step there is no previous alpha. When this option is `True` the previous alpha product is fixed to `1`,
             otherwise it uses the value of alpha at step 0.
         steps_offset (`int`, default `0`):
-            an offset added to the inference steps. You can use a combination of `offset=1` and
-            `set_alpha_to_one=False`, to make the last step use step 0 for the previous alpha product, as done in
-            stable diffusion.
+            An offset added to the inference steps, as required by some model families.
         prediction_type (`str`, default `epsilon`, optional):
             prediction type of the scheduler function, one of `epsilon` (predicting the noise of the diffusion
             process), `sample` (directly predicting the noisy sample`) or `v_prediction` (see section 2.4
@@ -110,7 +108,7 @@ class FlaxPNDMScheduler(FlaxSchedulerMixin, ConfigMixin):
             the `dtype` used for params and computation.
     """
 
-    _compatibles = _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
+    _compatibles = [e.name for e in FlaxKarrasDiffusionSchedulers]
 
     dtype: jnp.dtype
     pndm_order: int

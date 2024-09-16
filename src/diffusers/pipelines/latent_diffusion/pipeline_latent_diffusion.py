@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,37 +18,39 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
-
+from transformers import PretrainedConfig, PreTrainedModel, PreTrainedTokenizer
 from transformers.activations import ACT2FN
-from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutput
-from transformers.modeling_utils import PreTrainedModel
-from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import logging
 
 from ...models import AutoencoderKL, UNet2DConditionModel, UNet2DModel, VQModel
-from ...pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from ...schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from ...utils.torch_utils import randn_tensor
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 
 
 class LDMTextToImagePipeline(DiffusionPipeline):
     r"""
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
-    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
+    Pipeline for text-to-image generation using latent diffusion.
+
+    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
+    implemented for all pipelines (downloading, saving, running on a particular device, etc.).
 
     Parameters:
         vqvae ([`VQModel`]):
-            Vector-quantized (VQ) Model to encode and decode images to and from latent representations.
+            Vector-quantized (VQ) model to encode and decode images to and from latent representations.
         bert ([`LDMBertModel`]):
-            Text-encoder model based on [BERT](https://huggingface.co/docs/transformers/model_doc/bert) architecture.
-        tokenizer (`transformers.BertTokenizer`):
-            Tokenizer of class
-            [BertTokenizer](https://huggingface.co/docs/transformers/model_doc/bert#transformers.BertTokenizer).
-        unet ([`UNet2DConditionModel`]): Conditional U-Net architecture to denoise the encoded image latents.
+            Text-encoder model based on [`~transformers.BERT`].
+        tokenizer ([`~transformers.BertTokenizer`]):
+            A `BertTokenizer` to tokenize text.
+        unet ([`UNet2DConditionModel`]):
+            A `UNet2DConditionModel` to denoise the encoded image latents.
         scheduler ([`SchedulerMixin`]):
             A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
             [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
     """
+
+    model_cpu_offload_seq = "bert->unet->vqvae"
 
     def __init__(
         self,
@@ -72,45 +74,60 @@ class LDMTextToImagePipeline(DiffusionPipeline):
         guidance_scale: Optional[float] = 1.0,
         eta: Optional[float] = 0.0,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
         **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
         r"""
+        The call function to the pipeline for generation.
+
         Args:
             prompt (`str` or `List[str]`):
                 The prompt or prompts to guide the image generation.
-            height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
+            height (`int`, *optional*, defaults to `self.unet.config.sample_size * self.vae_scale_factor`):
                 The height in pixels of the generated image.
-            width (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor):
+            width (`int`, *optional*, defaults to `self.unet.config.sample_size * self.vae_scale_factor`):
                 The width in pixels of the generated image.
             num_inference_steps (`int`, *optional*, defaults to 50):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
             guidance_scale (`float`, *optional*, defaults to 1.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt` at
-                the, usually at the expense of lower image quality.
+                A higher guidance scale value encourages the model to generate images closely linked to the text
+                `prompt` at the expense of lower image quality. Guidance scale is enabled when `guidance_scale > 1`.
             generator (`torch.Generator`, *optional*):
-                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
-                to make generation deterministic.
-            latents (`torch.FloatTensor`, *optional*):
-                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
+                A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
+                generation deterministic.
+            latents (`torch.Tensor`, *optional*):
+                Pre-generated noisy latents sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
+                tensor is generated by sampling using the supplied random `generator`.
             output_type (`str`, *optional*, defaults to `"pil"`):
-                The output format of the generate image. Choose between
-                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
-            return_dict (`bool`, *optional*):
-                Whether or not to return a [`~pipeline_utils.ImagePipelineOutput`] instead of a plain tuple.
+                The output format of the generated image. Choose between `PIL.Image` or `np.array`.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`ImagePipelineOutput`] instead of a plain tuple.
+
+        Example:
+
+        ```py
+        >>> from diffusers import DiffusionPipeline
+
+        >>> # load model and scheduler
+        >>> ldm = DiffusionPipeline.from_pretrained("CompVis/ldm-text2im-large-256")
+
+        >>> # run pipeline in inference (sample random noise and denoise)
+        >>> prompt = "A painting of a squirrel eating a burger"
+        >>> images = ldm([prompt], num_inference_steps=50, eta=0.3, guidance_scale=6).images
+
+        >>> # save images
+        >>> for idx, image in enumerate(images):
+        ...     image.save(f"squirrel-{idx}.png")
+        ```
 
         Returns:
-            [`~pipeline_utils.ImagePipelineOutput`] or `tuple`: [`~pipelines.utils.ImagePipelineOutput`] if
-            `return_dict` is True, otherwise a `tuple. When returning a tuple, the first element is a list with the
-            generated images.
+            [`~pipelines.ImagePipelineOutput`] or `tuple`:
+                If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
+                returned where the first element is a list with the generated images.
         """
         # 0. Default height and width to unet
         height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -131,14 +148,14 @@ class LDMTextToImagePipeline(DiffusionPipeline):
             uncond_input = self.tokenizer(
                 [""] * batch_size, padding="max_length", max_length=77, truncation=True, return_tensors="pt"
             )
-            uncond_embeddings = self.bert(uncond_input.input_ids.to(self.device))[0]
+            negative_prompt_embeds = self.bert(uncond_input.input_ids.to(self._execution_device))[0]
 
         # get prompt text embeddings
         text_input = self.tokenizer(prompt, padding="max_length", max_length=77, truncation=True, return_tensors="pt")
-        text_embeddings = self.bert(text_input.input_ids.to(self.device))[0]
+        prompt_embeds = self.bert(text_input.input_ids.to(self._execution_device))[0]
 
         # get the initial random noise unless the user supplied it
-        latents_shape = (batch_size, self.unet.in_channels, height // 8, width // 8)
+        latents_shape = (batch_size, self.unet.config.in_channels, height // 8, width // 8)
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -146,24 +163,13 @@ class LDMTextToImagePipeline(DiffusionPipeline):
             )
 
         if latents is None:
-            rand_device = "cpu" if self.device.type == "mps" else self.device
-
-            if isinstance(generator, list):
-                latents_shape = (1,) + latents_shape[1:]
-                latents = [
-                    torch.randn(latents_shape, generator=generator[i], device=rand_device, dtype=text_embeddings.dtype)
-                    for i in range(batch_size)
-                ]
-                latents = torch.cat(latents, dim=0)
-            else:
-                latents = torch.randn(
-                    latents_shape, generator=generator, device=rand_device, dtype=text_embeddings.dtype
-                )
-            latents = latents.to(self.device)
+            latents = randn_tensor(
+                latents_shape, generator=generator, device=self._execution_device, dtype=prompt_embeds.dtype
+            )
         else:
             if latents.shape != latents_shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {latents_shape}")
-        latents = latents.to(self.device)
+        latents = latents.to(self._execution_device)
 
         self.scheduler.set_timesteps(num_inference_steps)
 
@@ -178,13 +184,13 @@ class LDMTextToImagePipeline(DiffusionPipeline):
             if guidance_scale == 1.0:
                 # guidance_scale of 1 means no guidance
                 latents_input = latents
-                context = text_embeddings
+                context = prompt_embeds
             else:
                 # For classifier free guidance, we need to do two forward passes.
                 # Here we concatenate the unconditional and text embeddings into a single batch
                 # to avoid doing two forward passes
                 latents_input = torch.cat([latents] * 2)
-                context = torch.cat([uncond_embeddings, text_embeddings])
+                context = torch.cat([negative_prompt_embeds, prompt_embeds])
 
             # predict the noise residual
             noise_pred = self.unet(latents_input, t, encoder_hidden_states=context).sample
@@ -197,7 +203,7 @@ class LDMTextToImagePipeline(DiffusionPipeline):
             latents = self.scheduler.step(noise_pred, t, latents, **extra_kwargs).prev_sample
 
         # scale and decode the image latents with vae
-        latents = 1 / 0.18215 * latents
+        latents = 1 / self.vqvae.config.scaling_factor * latents
         image = self.vqvae.decode(latents).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -459,17 +465,17 @@ class LDMBertEncoderLayer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.FloatTensor,
-        attention_mask: torch.FloatTensor,
-        layer_head_mask: torch.FloatTensor,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        layer_head_mask: torch.Tensor,
         output_attentions: Optional[bool] = False,
-    ) -> Tuple[torch.FloatTensor, Optional[torch.FloatTensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(seq_len, batch, embed_dim)`
-            attention_mask (`torch.FloatTensor`): attention mask of size
+            hidden_states (`torch.Tensor`): input to the layer of shape `(seq_len, batch, embed_dim)`
+            attention_mask (`torch.Tensor`): attention mask of size
                 `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
+            layer_head_mask (`torch.Tensor`): mask for attention heads in a given layer of size
                 `(encoder_attention_heads,)`.
             output_attentions (`bool`, *optional*):
                 Whether or not to return the attentions tensors of all attention layers. See `attentions` under
@@ -581,7 +587,7 @@ class LDMBertEncoder(LDMBertPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         head_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -609,7 +615,7 @@ class LDMBertEncoder(LDMBertPreTrainedModel):
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
 
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
+            inputs_embeds (`torch.Tensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
                 Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
                 This is useful if you want more control over how to convert `input_ids` indices into associated vectors
                 than the model's internal embedding lookup matrix.

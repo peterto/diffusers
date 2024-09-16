@@ -1,4 +1,4 @@
-# Copyright 2022 Kakao Brain and The HuggingFace Team. All rights reserved.
+# Copyright 2024 Kakao Brain and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,21 +15,21 @@
 import inspect
 from typing import List, Optional, Union
 
+import PIL.Image
 import torch
 from torch.nn import functional as F
-
-import PIL
-from diffusers import UNet2DConditionModel, UNet2DModel
-from diffusers.pipeline_utils import DiffusionPipeline, ImagePipelineOutput
-from diffusers.schedulers import UnCLIPScheduler
 from transformers import (
-    CLIPFeatureExtractor,
+    CLIPImageProcessor,
     CLIPTextModelWithProjection,
     CLIPTokenizer,
     CLIPVisionModelWithProjection,
 )
 
-from ...utils import is_accelerate_available, logging
+from ...models import UNet2DConditionModel, UNet2DModel
+from ...schedulers import UnCLIPScheduler
+from ...utils import logging
+from ...utils.torch_utils import randn_tensor
+from ..pipeline_utils import DiffusionPipeline, ImagePipelineOutput
 from .text_proj import UnCLIPTextProjModel
 
 
@@ -38,49 +38,46 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class UnCLIPImageVariationPipeline(DiffusionPipeline):
     """
-    Pipeline to generate variations from an input image using unCLIP
+    Pipeline to generate image variations from an input image using UnCLIP.
 
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
-    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
+    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods
+    implemented for all pipelines (downloading, saving, running on a particular device, etc.).
 
     Args:
-        text_encoder ([`CLIPTextModelWithProjection`]):
+        text_encoder ([`~transformers.CLIPTextModelWithProjection`]):
             Frozen text-encoder.
-        tokenizer (`CLIPTokenizer`):
-            Tokenizer of class
-            [CLIPTokenizer](https://huggingface.co/docs/transformers/v4.21.0/en/model_doc/clip#transformers.CLIPTokenizer).
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        tokenizer ([`~transformers.CLIPTokenizer`]):
+            A `CLIPTokenizer` to tokenize text.
+        feature_extractor ([`~transformers.CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `image_encoder`.
-        image_encoder ([`CLIPVisionModelWithProjection`]):
-            Frozen CLIP image-encoder. unCLIP Image Variation uses the vision portion of
-            [CLIP](https://huggingface.co/docs/transformers/model_doc/clip#transformers.CLIPVisionModelWithProjection),
-            specifically the [clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14) variant.
+        image_encoder ([`~transformers.CLIPVisionModelWithProjection`]):
+            Frozen CLIP image-encoder ([clip-vit-large-patch14](https://huggingface.co/openai/clip-vit-large-patch14)).
         text_proj ([`UnCLIPTextProjModel`]):
             Utility class to prepare and combine the embeddings before they are passed to the decoder.
         decoder ([`UNet2DConditionModel`]):
             The decoder to invert the image embedding into an image.
         super_res_first ([`UNet2DModel`]):
-            Super resolution unet. Used in all but the last step of the super resolution diffusion process.
+            Super resolution UNet. Used in all but the last step of the super resolution diffusion process.
         super_res_last ([`UNet2DModel`]):
-            Super resolution unet. Used in the last step of the super resolution diffusion process.
+            Super resolution UNet. Used in the last step of the super resolution diffusion process.
         decoder_scheduler ([`UnCLIPScheduler`]):
-            Scheduler used in the decoder denoising process. Just a modified DDPMScheduler.
+            Scheduler used in the decoder denoising process (a modified [`DDPMScheduler`]).
         super_res_scheduler ([`UnCLIPScheduler`]):
-            Scheduler used in the super resolution denoising process. Just a modified DDPMScheduler.
-
+            Scheduler used in the super resolution denoising process (a modified [`DDPMScheduler`]).
     """
 
     decoder: UNet2DConditionModel
     text_proj: UnCLIPTextProjModel
     text_encoder: CLIPTextModelWithProjection
     tokenizer: CLIPTokenizer
-    feature_extractor: CLIPFeatureExtractor
+    feature_extractor: CLIPImageProcessor
     image_encoder: CLIPVisionModelWithProjection
     super_res_first: UNet2DModel
     super_res_last: UNet2DModel
 
     decoder_scheduler: UnCLIPScheduler
     super_res_scheduler: UnCLIPScheduler
+    model_cpu_offload_seq = "text_encoder->image_encoder->text_proj->decoder->super_res_first->super_res_last"
 
     def __init__(
         self,
@@ -88,7 +85,7 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
         text_encoder: CLIPTextModelWithProjection,
         tokenizer: CLIPTokenizer,
         text_proj: UnCLIPTextProjModel,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
         image_encoder: CLIPVisionModelWithProjection,
         super_res_first: UNet2DModel,
         super_res_last: UNet2DModel,
@@ -113,11 +110,7 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
     # Copied from diffusers.pipelines.unclip.pipeline_unclip.UnCLIPPipeline.prepare_latents
     def prepare_latents(self, shape, dtype, device, generator, latents, scheduler):
         if latents is None:
-            if device.type == "mps":
-                # randn does not work reproducibly on mps
-                latents = torch.randn(shape, generator=generator, device="cpu", dtype=dtype).to(device)
-            else:
-                latents = torch.randn(shape, generator=generator, device=device, dtype=dtype)
+            latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
         else:
             if latents.shape != shape:
                 raise ValueError(f"Unexpected latents shape, got {latents.shape}, expected {shape}")
@@ -126,7 +119,6 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
         latents = latents * scheduler.init_noise_sigma
         return latents
 
-    # Copied from diffusers.pipelines.unclip.pipeline_unclip.UnCLIPPipeline._encode_prompt
     def _encode_prompt(self, prompt, device, num_images_per_prompt, do_classifier_free_guidance):
         batch_size = len(prompt) if isinstance(prompt, list) else 1
 
@@ -139,21 +131,12 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
         )
         text_input_ids = text_inputs.input_ids
         text_mask = text_inputs.attention_mask.bool().to(device)
-
-        if text_input_ids.shape[-1] > self.tokenizer.model_max_length:
-            removed_text = self.tokenizer.batch_decode(text_input_ids[:, self.tokenizer.model_max_length :])
-            logger.warning(
-                "The following part of your input was truncated because CLIP can only handle sequences up to"
-                f" {self.tokenizer.model_max_length} tokens: {removed_text}"
-            )
-            text_input_ids = text_input_ids[:, : self.tokenizer.model_max_length]
-
         text_encoder_output = self.text_encoder(text_input_ids.to(device))
 
-        text_embeddings = text_encoder_output.text_embeds
+        prompt_embeds = text_encoder_output.text_embeds
         text_encoder_hidden_states = text_encoder_output.last_hidden_state
 
-        text_embeddings = text_embeddings.repeat_interleave(num_images_per_prompt, dim=0)
+        prompt_embeds = prompt_embeds.repeat_interleave(num_images_per_prompt, dim=0)
         text_encoder_hidden_states = text_encoder_hidden_states.repeat_interleave(num_images_per_prompt, dim=0)
         text_mask = text_mask.repeat_interleave(num_images_per_prompt, dim=0)
 
@@ -169,16 +152,16 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
                 return_tensors="pt",
             )
             uncond_text_mask = uncond_input.attention_mask.bool().to(device)
-            uncond_embeddings_text_encoder_output = self.text_encoder(uncond_input.input_ids.to(device))
+            negative_prompt_embeds_text_encoder_output = self.text_encoder(uncond_input.input_ids.to(device))
 
-            uncond_embeddings = uncond_embeddings_text_encoder_output.text_embeds
-            uncond_text_encoder_hidden_states = uncond_embeddings_text_encoder_output.last_hidden_state
+            negative_prompt_embeds = negative_prompt_embeds_text_encoder_output.text_embeds
+            uncond_text_encoder_hidden_states = negative_prompt_embeds_text_encoder_output.last_hidden_state
 
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
 
-            seq_len = uncond_embeddings.shape[1]
-            uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt)
-            uncond_embeddings = uncond_embeddings.view(batch_size * num_images_per_prompt, seq_len)
+            seq_len = negative_prompt_embeds.shape[1]
+            negative_prompt_embeds = negative_prompt_embeds.repeat(1, num_images_per_prompt)
+            negative_prompt_embeds = negative_prompt_embeds.view(batch_size * num_images_per_prompt, seq_len)
 
             seq_len = uncond_text_encoder_hidden_states.shape[1]
             uncond_text_encoder_hidden_states = uncond_text_encoder_hidden_states.repeat(1, num_images_per_prompt, 1)
@@ -192,92 +175,51 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
             # For classifier free guidance, we need to do two forward passes.
             # Here we concatenate the unconditional and text embeddings into a single batch
             # to avoid doing two forward passes
-            text_embeddings = torch.cat([uncond_embeddings, text_embeddings])
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds])
             text_encoder_hidden_states = torch.cat([uncond_text_encoder_hidden_states, text_encoder_hidden_states])
 
             text_mask = torch.cat([uncond_text_mask, text_mask])
 
-        return text_embeddings, text_encoder_hidden_states, text_mask
+        return prompt_embeds, text_encoder_hidden_states, text_mask
 
-    def _encode_image(self, image, device, num_images_per_prompt):
+    def _encode_image(self, image, device, num_images_per_prompt, image_embeddings: Optional[torch.Tensor] = None):
         dtype = next(self.image_encoder.parameters()).dtype
 
-        if not isinstance(image, torch.Tensor):
-            image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+        if image_embeddings is None:
+            if not isinstance(image, torch.Tensor):
+                image = self.feature_extractor(images=image, return_tensors="pt").pixel_values
 
-        image = image.to(device=device, dtype=dtype)
-        image_embeddings = self.image_encoder(image).image_embeds
+            image = image.to(device=device, dtype=dtype)
+            image_embeddings = self.image_encoder(image).image_embeds
 
         image_embeddings = image_embeddings.repeat_interleave(num_images_per_prompt, dim=0)
 
         return image_embeddings
 
-    def enable_sequential_cpu_offload(self, gpu_id=0):
-        r"""
-        Offloads all models to CPU using accelerate, significantly reducing memory usage. When called, the pipeline's
-        models have their state dicts saved to CPU and then are moved to a `torch.device('meta') and loaded to GPU only
-        when their specific submodule has its `forward` method called.
-        """
-        if is_accelerate_available():
-            from accelerate import cpu_offload
-        else:
-            raise ImportError("Please install accelerate via `pip install accelerate`")
-
-        device = torch.device(f"cuda:{gpu_id}")
-
-        models = [
-            self.decoder,
-            self.text_proj,
-            self.text_encoder,
-            self.super_res_first,
-            self.super_res_last,
-        ]
-        for cpu_offloaded_model in models:
-            if cpu_offloaded_model is not None:
-                cpu_offload(cpu_offloaded_model, device)
-
-    @property
-    # Copied from diffusers.pipelines.unclip.pipeline_unclip.UnCLIPPipeline._execution_device
-    def _execution_device(self):
-        r"""
-        Returns the device on which the pipeline's models will be executed. After calling
-        `pipeline.enable_sequential_cpu_offload()` the execution device can only be inferred from Accelerate's module
-        hooks.
-        """
-        if self.device != torch.device("meta") or not hasattr(self.decoder, "_hf_hook"):
-            return self.device
-        for module in self.decoder.modules():
-            if (
-                hasattr(module, "_hf_hook")
-                and hasattr(module._hf_hook, "execution_device")
-                and module._hf_hook.execution_device is not None
-            ):
-                return torch.device(module._hf_hook.execution_device)
-        return self.device
-
     @torch.no_grad()
     def __call__(
         self,
-        image: Union[PIL.Image.Image, List[PIL.Image.Image], torch.FloatTensor],
+        image: Optional[Union[PIL.Image.Image, List[PIL.Image.Image], torch.Tensor]] = None,
         num_images_per_prompt: int = 1,
         decoder_num_inference_steps: int = 25,
         super_res_num_inference_steps: int = 7,
         generator: Optional[torch.Generator] = None,
-        decoder_latents: Optional[torch.FloatTensor] = None,
-        super_res_latents: Optional[torch.FloatTensor] = None,
+        decoder_latents: Optional[torch.Tensor] = None,
+        super_res_latents: Optional[torch.Tensor] = None,
+        image_embeddings: Optional[torch.Tensor] = None,
         decoder_guidance_scale: float = 8.0,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
     ):
         """
-        Function invoked when calling the pipeline for generation.
+        The call function to the pipeline for generation.
 
         Args:
-            image (`PIL.Image.Image` or `List[PIL.Image.Image]` or `torch.FloatTensor`):
-                The image or images to guide the image generation. If you provide a tensor, it needs to comply with the
-                configuration of
-                [this](https://huggingface.co/fusing/karlo-image-variations-diffusers/blob/main/feature_extractor/preprocessor_config.json)
-                `CLIPFeatureExtractor`.
+            image (`PIL.Image.Image` or `List[PIL.Image.Image]` or `torch.Tensor`):
+                `Image` or tensor representing an image batch to be used as the starting point. If you provide a
+                tensor, it needs to be compatible with the [`CLIPImageProcessor`]
+                [configuration](https://huggingface.co/fusing/karlo-image-variations-diffusers/blob/main/feature_extractor/preprocessor_config.json).
+                Can be left as `None` only when `image_embeddings` are passed.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
             decoder_num_inference_steps (`int`, *optional*, defaults to 25):
@@ -287,30 +229,37 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
                 The number of denoising steps for super resolution. More denoising steps usually lead to a higher
                 quality image at the expense of slower inference.
             generator (`torch.Generator`, *optional*):
-                One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
-                to make generation deterministic.
-            decoder_latents (`torch.FloatTensor` of shape (batch size, channels, height, width), *optional*):
+                A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
+                generation deterministic.
+            decoder_latents (`torch.Tensor` of shape (batch size, channels, height, width), *optional*):
                 Pre-generated noisy latents to be used as inputs for the decoder.
-            super_res_latents (`torch.FloatTensor` of shape (batch size, channels, super res height, super res width), *optional*):
+            super_res_latents (`torch.Tensor` of shape (batch size, channels, super res height, super res width), *optional*):
                 Pre-generated noisy latents to be used as inputs for the decoder.
             decoder_guidance_scale (`float`, *optional*, defaults to 4.0):
-                Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://arxiv.org/abs/2207.12598).
-                `guidance_scale` is defined as `w` of equation 2. of [Imagen
-                Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
-                1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
-                usually at the expense of lower image quality.
+                A higher guidance scale value encourages the model to generate images closely linked to the text
+                `prompt` at the expense of lower image quality. Guidance scale is enabled when `guidance_scale > 1`.
+            image_embeddings (`torch.Tensor`, *optional*):
+                Pre-defined image embeddings that can be derived from the image encoder. Pre-defined image embeddings
+                can be passed for tasks like image interpolations. `image` can be left as `None`.
             output_type (`str`, *optional*, defaults to `"pil"`):
-                The output format of the generated image. Choose between
-                [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+                The output format of the generated image. Choose between `PIL.Image` or `np.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
-                Whether or not to return a [`~pipeline_utils.ImagePipelineOutput`] instead of a plain tuple.
+                Whether or not to return a [`~pipelines.ImagePipelineOutput`] instead of a plain tuple.
+
+        Returns:
+            [`~pipelines.ImagePipelineOutput`] or `tuple`:
+                If `return_dict` is `True`, [`~pipelines.ImagePipelineOutput`] is returned, otherwise a `tuple` is
+                returned where the first element is a list with the generated images.
         """
-        if isinstance(image, PIL.Image.Image):
-            batch_size = 1
-        elif isinstance(image, list):
-            batch_size = len(image)
+        if image is not None:
+            if isinstance(image, PIL.Image.Image):
+                batch_size = 1
+            elif isinstance(image, list):
+                batch_size = len(image)
+            else:
+                batch_size = image.shape[0]
         else:
-            batch_size = image.shape[0]
+            batch_size = image_embeddings.shape[0]
 
         prompt = [""] * batch_size
 
@@ -320,37 +269,45 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
 
         do_classifier_free_guidance = decoder_guidance_scale > 1.0
 
-        text_embeddings, text_encoder_hidden_states, text_mask = self._encode_prompt(
+        prompt_embeds, text_encoder_hidden_states, text_mask = self._encode_prompt(
             prompt, device, num_images_per_prompt, do_classifier_free_guidance
         )
 
-        image_embeddings = self._encode_image(image, device, num_images_per_prompt)
+        image_embeddings = self._encode_image(image, device, num_images_per_prompt, image_embeddings)
 
         # decoder
-
         text_encoder_hidden_states, additive_clip_time_embeddings = self.text_proj(
             image_embeddings=image_embeddings,
-            text_embeddings=text_embeddings,
+            prompt_embeds=prompt_embeds,
             text_encoder_hidden_states=text_encoder_hidden_states,
             do_classifier_free_guidance=do_classifier_free_guidance,
         )
 
-        decoder_text_mask = F.pad(text_mask, (self.text_proj.clip_extra_context_tokens, 0), value=1)
+        if device.type == "mps":
+            # HACK: MPS: There is a panic when padding bool tensors,
+            # so cast to int tensor for the pad and back to bool afterwards
+            text_mask = text_mask.type(torch.int)
+            decoder_text_mask = F.pad(text_mask, (self.text_proj.clip_extra_context_tokens, 0), value=1)
+            decoder_text_mask = decoder_text_mask.type(torch.bool)
+        else:
+            decoder_text_mask = F.pad(text_mask, (self.text_proj.clip_extra_context_tokens, 0), value=True)
 
         self.decoder_scheduler.set_timesteps(decoder_num_inference_steps, device=device)
         decoder_timesteps_tensor = self.decoder_scheduler.timesteps
 
-        num_channels_latents = self.decoder.in_channels
-        height = self.decoder.sample_size
-        width = self.decoder.sample_size
-        decoder_latents = self.prepare_latents(
-            (batch_size, num_channels_latents, height, width),
-            text_encoder_hidden_states.dtype,
-            device,
-            generator,
-            decoder_latents,
-            self.decoder_scheduler,
-        )
+        num_channels_latents = self.decoder.config.in_channels
+        height = self.decoder.config.sample_size
+        width = self.decoder.config.sample_size
+
+        if decoder_latents is None:
+            decoder_latents = self.prepare_latents(
+                (batch_size, num_channels_latents, height, width),
+                text_encoder_hidden_states.dtype,
+                device,
+                generator,
+                decoder_latents,
+                self.decoder_scheduler,
+            )
 
         for i, t in enumerate(self.progress_bar(decoder_timesteps_tensor)):
             # expand the latents if we are doing classifier free guidance
@@ -392,25 +349,31 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
         self.super_res_scheduler.set_timesteps(super_res_num_inference_steps, device=device)
         super_res_timesteps_tensor = self.super_res_scheduler.timesteps
 
-        channels = self.super_res_first.in_channels // 2
-        height = self.super_res_first.sample_size
-        width = self.super_res_first.sample_size
-        super_res_latents = self.prepare_latents(
-            (batch_size, channels, height, width),
-            image_small.dtype,
-            device,
-            generator,
-            super_res_latents,
-            self.super_res_scheduler,
-        )
+        channels = self.super_res_first.config.in_channels // 2
+        height = self.super_res_first.config.sample_size
+        width = self.super_res_first.config.sample_size
 
-        interpolate_antialias = {}
-        if "antialias" in inspect.signature(F.interpolate).parameters:
-            interpolate_antialias["antialias"] = True
+        if super_res_latents is None:
+            super_res_latents = self.prepare_latents(
+                (batch_size, channels, height, width),
+                image_small.dtype,
+                device,
+                generator,
+                super_res_latents,
+                self.super_res_scheduler,
+            )
 
-        image_upscaled = F.interpolate(
-            image_small, size=[height, width], mode="bicubic", align_corners=False, **interpolate_antialias
-        )
+        if device.type == "mps":
+            # MPS does not support many interpolations
+            image_upscaled = F.interpolate(image_small, size=[height, width])
+        else:
+            interpolate_antialias = {}
+            if "antialias" in inspect.signature(F.interpolate).parameters:
+                interpolate_antialias["antialias"] = True
+
+            image_upscaled = F.interpolate(
+                image_small, size=[height, width], mode="bicubic", align_corners=False, **interpolate_antialias
+            )
 
         for i, t in enumerate(self.progress_bar(super_res_timesteps_tensor)):
             # no classifier free guidance
@@ -440,6 +403,7 @@ class UnCLIPImageVariationPipeline(DiffusionPipeline):
         image = super_res_latents
 
         # done super res
+        self.maybe_free_model_hooks()
 
         # post processing
 

@@ -5,15 +5,15 @@ from typing import Callable, List, Optional, Union
 
 import numpy as np
 import torch
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
 
 from diffusers.configuration_utils import FrozenDict
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.pipeline_utils import DiffusionPipeline
+from diffusers.pipelines.pipeline_utils import DiffusionPipeline, StableDiffusionMixin
 from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
 from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 from diffusers.utils import deprecate, logging
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
@@ -46,7 +46,7 @@ def slerp(t, v0, v1, DOT_THRESHOLD=0.9995):
     return v2
 
 
-class StableDiffusionWalkPipeline(DiffusionPipeline):
+class StableDiffusionWalkPipeline(DiffusionPipeline, StableDiffusionMixin):
     r"""
     Pipeline for text-to-image generation using Stable Diffusion.
 
@@ -70,7 +70,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offensive or harmful.
             Please, refer to the [model card](https://huggingface.co/CompVis/stable-diffusion-v1-4) for details.
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
@@ -82,7 +82,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
         unet: UNet2DConditionModel,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
         safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
 
@@ -120,33 +120,6 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        r"""
-        Enable sliced attention computation.
-
-        When this option is enabled, the attention module will split the input tensor in slices, to compute attention
-        in several steps. This is useful to save some memory in exchange for a small speed decrease.
-
-        Args:
-            slice_size (`str` or `int`, *optional*, defaults to `"auto"`):
-                When `"auto"`, halves the input to the attention heads, so attention will be computed in two steps. If
-                a number is provided, uses as many slices as `attention_head_dim // slice_size`. In this case,
-                `attention_head_dim` must be a multiple of `slice_size`.
-        """
-        if slice_size == "auto":
-            # half the attention head size is usually a good trade-off between
-            # speed and memory
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        r"""
-        Disable sliced attention computation. If `enable_attention_slicing` was previously invoked, this method will go
-        back to computing attention in one step.
-        """
-        # set slice_size = `None` to disable `attention slicing`
-        self.enable_attention_slicing(None)
-
     @torch.no_grad()
     def __call__(
         self,
@@ -159,12 +132,12 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
         generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.FloatTensor] = None,
+        latents: Optional[torch.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-        callback_steps: Optional[int] = 1,
-        text_embeddings: Optional[torch.FloatTensor] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+        callback_steps: int = 1,
+        text_embeddings: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         r"""
@@ -197,7 +170,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
             generator (`torch.Generator`, *optional*):
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
@@ -209,11 +182,11 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
                 plain tuple.
             callback (`Callable`, *optional*):
                 A function that will be called every `callback_steps` steps during inference. The function will be
-                called with the following arguments: `callback(step: int, timestep: int, latents: torch.FloatTensor)`.
+                called with the following arguments: `callback(step: int, timestep: int, latents: torch.Tensor)`.
             callback_steps (`int`, *optional*, defaults to 1):
                 The frequency at which the `callback` function will be called. If not specified, the callback will be
                 called at every step.
-            text_embeddings (`torch.FloatTensor`, *optional*, defaults to `None`):
+            text_embeddings (`torch.Tensor`, *optional*, defaults to `None`):
                 Pre-generated text embeddings to be used as inputs for image generation. Can be used in place of
                 `prompt` to avoid re-computing the embeddings. If not provided, the embeddings will be generated from
                 the supplied `prompt`.
@@ -320,7 +293,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
         # Unlike in other pipelines, latents need to be generated in the target device
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
-        latents_shape = (batch_size * num_images_per_prompt, self.unet.in_channels, height // 8, width // 8)
+        latents_shape = (batch_size * num_images_per_prompt, self.unet.config.in_channels, height // 8, width // 8)
         latents_dtype = text_embeddings.dtype
         if latents is None:
             if self.device.type == "mps":
@@ -372,14 +345,15 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
 
             # call the callback, if provided
             if callback is not None and i % callback_steps == 0:
-                callback(i, t, latents)
+                step_idx = i // getattr(self.scheduler, "order", 1)
+                callback(step_idx, t, latents)
 
         latents = 1 / 0.18215 * latents
         image = self.vae.decode(latents).sample
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if self.safety_checker is not None:
@@ -416,7 +390,7 @@ class StableDiffusionWalkPipeline(DiffusionPipeline):
     def get_noise(self, seed, dtype=torch.float32, height=512, width=512):
         """Takes in random seed and returns corresponding noise vector"""
         return torch.randn(
-            (1, self.unet.in_channels, height // 8, width // 8),
+            (1, self.unet.config.in_channels, height // 8, width // 8),
             generator=torch.Generator(device=self.device).manual_seed(seed),
             device=self.device,
             dtype=dtype,

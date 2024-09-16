@@ -7,6 +7,7 @@ import os.path as osp
 import re
 
 import torch
+from safetensors.torch import load_file, save_file
 
 
 # =================#
@@ -158,10 +159,21 @@ vae_conversion_map_attn = [
     ("proj_out.", "proj_attn."),
 ]
 
+# This is probably not the most ideal solution, but it does work.
+vae_extra_conversion_map = [
+    ("to_q", "q"),
+    ("to_k", "k"),
+    ("to_v", "v"),
+    ("to_out.0", "proj_out"),
+]
+
 
 def reshape_weight_for_sd(w):
     # convert HF linear weights to SD conv2d weights
-    return w.reshape(*w.shape, 1, 1)
+    if not w.ndim == 1:
+        return w.reshape(*w.shape, 1, 1)
+    else:
+        return w
 
 
 def convert_vae_state_dict(vae_state_dict):
@@ -177,11 +189,20 @@ def convert_vae_state_dict(vae_state_dict):
             mapping[k] = v
     new_state_dict = {v: vae_state_dict[k] for k, v in mapping.items()}
     weights_to_convert = ["q", "k", "v", "proj_out"]
+    keys_to_rename = {}
     for k, v in new_state_dict.items():
         for weight_name in weights_to_convert:
             if f"mid.attn_1.{weight_name}.weight" in k:
                 print(f"Reshaping {k} for SD format")
                 new_state_dict[k] = reshape_weight_for_sd(v)
+        for weight_name, real_weight_name in vae_extra_conversion_map:
+            if f"mid.attn_1.{weight_name}.weight" in k or f"mid.attn_1.{weight_name}.bias" in k:
+                keys_to_rename[k] = k.replace(weight_name, real_weight_name)
+    for k, v in keys_to_rename.items():
+        if k in new_state_dict:
+            print(f"Renaming {k} to {v}")
+            new_state_dict[v] = reshape_weight_for_sd(new_state_dict[k])
+            del new_state_dict[k]
     return new_state_dict
 
 
@@ -266,6 +287,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", default=None, type=str, required=True, help="Path to the model to convert.")
     parser.add_argument("--checkpoint_path", default=None, type=str, required=True, help="Path to the output model.")
     parser.add_argument("--half", action="store_true", help="Save weights in half precision.")
+    parser.add_argument(
+        "--use_safetensors", action="store_true", help="Save weights use safetensors, default is ckpt."
+    )
 
     args = parser.parse_args()
 
@@ -273,22 +297,37 @@ if __name__ == "__main__":
 
     assert args.checkpoint_path is not None, "Must provide a checkpoint path!"
 
-    unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.bin")
-    vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.bin")
-    text_enc_path = osp.join(args.model_path, "text_encoder", "pytorch_model.bin")
+    # Path for safetensors
+    unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.safetensors")
+    vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.safetensors")
+    text_enc_path = osp.join(args.model_path, "text_encoder", "model.safetensors")
+
+    # Load models from safetensors if it exists, if it doesn't pytorch
+    if osp.exists(unet_path):
+        unet_state_dict = load_file(unet_path, device="cpu")
+    else:
+        unet_path = osp.join(args.model_path, "unet", "diffusion_pytorch_model.bin")
+        unet_state_dict = torch.load(unet_path, map_location="cpu")
+
+    if osp.exists(vae_path):
+        vae_state_dict = load_file(vae_path, device="cpu")
+    else:
+        vae_path = osp.join(args.model_path, "vae", "diffusion_pytorch_model.bin")
+        vae_state_dict = torch.load(vae_path, map_location="cpu")
+
+    if osp.exists(text_enc_path):
+        text_enc_dict = load_file(text_enc_path, device="cpu")
+    else:
+        text_enc_path = osp.join(args.model_path, "text_encoder", "pytorch_model.bin")
+        text_enc_dict = torch.load(text_enc_path, map_location="cpu")
 
     # Convert the UNet model
-    unet_state_dict = torch.load(unet_path, map_location="cpu")
     unet_state_dict = convert_unet_state_dict(unet_state_dict)
     unet_state_dict = {"model.diffusion_model." + k: v for k, v in unet_state_dict.items()}
 
     # Convert the VAE model
-    vae_state_dict = torch.load(vae_path, map_location="cpu")
     vae_state_dict = convert_vae_state_dict(vae_state_dict)
     vae_state_dict = {"first_stage_model." + k: v for k, v in vae_state_dict.items()}
-
-    # Convert the text encoder model
-    text_enc_dict = torch.load(text_enc_path, map_location="cpu")
 
     # Easiest way to identify v2.0 model seems to be that the text encoder (OpenCLIP) is deeper
     is_v20_model = "text_model.encoder.layers.22.layer_norm2.bias" in text_enc_dict
@@ -306,5 +345,9 @@ if __name__ == "__main__":
     state_dict = {**unet_state_dict, **vae_state_dict, **text_enc_dict}
     if args.half:
         state_dict = {k: v.half() for k, v in state_dict.items()}
-    state_dict = {"state_dict": state_dict}
-    torch.save(state_dict, args.checkpoint_path)
+
+    if args.use_safetensors:
+        save_file(state_dict, args.checkpoint_path)
+    else:
+        state_dict = {"state_dict": state_dict}
+        torch.save(state_dict, args.checkpoint_path)

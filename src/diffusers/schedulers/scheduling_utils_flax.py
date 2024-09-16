@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,16 +15,30 @@ import importlib
 import math
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from enum import Enum
+from typing import Optional, Tuple, Union
 
 import flax
 import jax.numpy as jnp
+from huggingface_hub.utils import validate_hf_hub_args
 
-from ..utils import _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS, BaseOutput
+from ..utils import BaseOutput, PushToHubMixin
 
 
 SCHEDULER_CONFIG_NAME = "scheduler_config.json"
-_FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS = ["Flax" + c for c in _COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS]
+
+
+# NOTE: We make this type an enum because it simplifies usage in docs and prevents
+# circular imports when used for `_compatibles` within the schedulers module.
+# When it's used as a type in pipelines, it really is a Union because the actual
+# scheduler instance is passed in.
+class FlaxKarrasDiffusionSchedulers(Enum):
+    FlaxDDIMScheduler = 1
+    FlaxDDPMScheduler = 2
+    FlaxPNDMScheduler = 3
+    FlaxLMSDiscreteScheduler = 4
+    FlaxDPMSolverMultistepScheduler = 5
+    FlaxEulerDiscreteScheduler = 6
 
 
 @dataclass
@@ -41,7 +55,7 @@ class FlaxSchedulerOutput(BaseOutput):
     prev_sample: jnp.ndarray
 
 
-class FlaxSchedulerMixin:
+class FlaxSchedulerMixin(PushToHubMixin):
     """
     Mixin containing common functions for the schedulers.
 
@@ -57,9 +71,10 @@ class FlaxSchedulerMixin:
     has_compatibles = True
 
     @classmethod
+    @validate_hf_hub_args
     def from_pretrained(
         cls,
-        pretrained_model_name_or_path: Dict[str, Any] = None,
+        pretrained_model_name_or_path: Optional[Union[str, os.PathLike]] = None,
         subfolder: Optional[str] = None,
         return_unused_kwargs=False,
         **kwargs,
@@ -87,9 +102,7 @@ class FlaxSchedulerMixin:
             force_download (`bool`, *optional*, defaults to `False`):
                 Whether or not to force the (re-)download of the model weights and configuration files, overriding the
                 cached versions if they exist.
-            resume_download (`bool`, *optional*, defaults to `False`):
-                Whether or not to delete incompletely received files. Will attempt to resume the download if such a
-                file exists.
+
             proxies (`Dict[str, str]`, *optional*):
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
@@ -97,7 +110,7 @@ class FlaxSchedulerMixin:
                 Whether or not to also return a dictionary containing missing keys, unexpected keys and error messages.
             local_files_only(`bool`, *optional*, defaults to `False`):
                 Whether or not to only look at local files (i.e., do not try to download the model).
-            use_auth_token (`str` or *bool*, *optional*):
+            token (`str` or *bool*, *optional*):
                 The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
                 when running `transformers-cli login` (stored in `~/.huggingface`).
             revision (`str`, *optional*, defaults to `"main"`):
@@ -144,6 +157,12 @@ class FlaxSchedulerMixin:
         Args:
             save_directory (`str` or `os.PathLike`):
                 Directory where the configuration JSON file will be saved (will be created if it does not exist).
+            push_to_hub (`bool`, *optional*, defaults to `False`):
+                Whether or not to push your model to the Hugging Face Hub after saving it. You can specify the
+                repository you want to push to with `repo_id` (will default to the name of `save_directory` in your
+                namespace).
+            kwargs (`Dict[str, Any]`, *optional*):
+                Additional keyword arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
         self.save_config(save_directory=save_directory, push_to_hub=push_to_hub, **kwargs)
 
@@ -242,7 +261,7 @@ class CommonSchedulerState:
         )
 
 
-def add_noise_common(
+def get_sqrt_alpha_prod(
     state: CommonSchedulerState, original_samples: jnp.ndarray, noise: jnp.ndarray, timesteps: jnp.ndarray
 ):
     alphas_cumprod = state.alphas_cumprod
@@ -255,5 +274,18 @@ def add_noise_common(
     sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
     sqrt_one_minus_alpha_prod = broadcast_to_shape_from_left(sqrt_one_minus_alpha_prod, original_samples.shape)
 
+    return sqrt_alpha_prod, sqrt_one_minus_alpha_prod
+
+
+def add_noise_common(
+    state: CommonSchedulerState, original_samples: jnp.ndarray, noise: jnp.ndarray, timesteps: jnp.ndarray
+):
+    sqrt_alpha_prod, sqrt_one_minus_alpha_prod = get_sqrt_alpha_prod(state, original_samples, noise, timesteps)
     noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
     return noisy_samples
+
+
+def get_velocity_common(state: CommonSchedulerState, sample: jnp.ndarray, noise: jnp.ndarray, timesteps: jnp.ndarray):
+    sqrt_alpha_prod, sqrt_one_minus_alpha_prod = get_sqrt_alpha_prod(state, sample, noise, timesteps)
+    velocity = sqrt_alpha_prod * noise - sqrt_one_minus_alpha_prod * sample
+    return velocity

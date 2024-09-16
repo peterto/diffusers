@@ -1,4 +1,4 @@
-# Copyright 2022 Google Brain and The HuggingFace Team. All rights reserved.
+# Copyright 2024 Google Brain and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import flax
+import jax
 import jax.numpy as jnp
 from jax import random
 
@@ -116,7 +117,8 @@ class FlaxScoreSdeVeScheduler(FlaxSchedulerMixin, ConfigMixin):
             state (`ScoreSdeVeSchedulerState`): the `FlaxScoreSdeVeScheduler` state data class instance.
             num_inference_steps (`int`):
                 the number of diffusion steps used when generating samples with a pre-trained model.
-            sampling_eps (`float`, optional): final timestep value (overrides value given at Scheduler instantiation).
+            sampling_eps (`float`, optional):
+                final timestep value (overrides value given at Scheduler instantiation).
 
         """
         sampling_eps = sampling_eps if sampling_eps is not None else self.config.sampling_eps
@@ -143,8 +145,10 @@ class FlaxScoreSdeVeScheduler(FlaxSchedulerMixin, ConfigMixin):
                 the number of diffusion steps used when generating samples with a pre-trained model.
             sigma_min (`float`, optional):
                 initial noise scale value (overrides value given at Scheduler instantiation).
-            sigma_max (`float`, optional): final noise scale value (overrides value given at Scheduler instantiation).
-            sampling_eps (`float`, optional): final timestep value (overrides value given at Scheduler instantiation).
+            sigma_max (`float`, optional):
+                final noise scale value (overrides value given at Scheduler instantiation).
+            sampling_eps (`float`, optional):
+                final timestep value (overrides value given at Scheduler instantiation).
         """
         sigma_min = sigma_min if sigma_min is not None else self.config.sigma_min
         sigma_max = sigma_max if sigma_max is not None else self.config.sigma_max
@@ -166,7 +170,7 @@ class FlaxScoreSdeVeScheduler(FlaxSchedulerMixin, ConfigMixin):
         model_output: jnp.ndarray,
         timestep: int,
         sample: jnp.ndarray,
-        key: random.KeyArray,
+        key: jax.Array,
         return_dict: bool = True,
     ) -> Union[FlaxSdeVeOutput, Tuple]:
         """
@@ -225,7 +229,7 @@ class FlaxScoreSdeVeScheduler(FlaxSchedulerMixin, ConfigMixin):
         state: ScoreSdeVeSchedulerState,
         model_output: jnp.ndarray,
         sample: jnp.ndarray,
-        key: random.KeyArray,
+        key: jax.Array,
         return_dict: bool = True,
     ) -> Union[FlaxSdeVeOutput, Tuple]:
         """

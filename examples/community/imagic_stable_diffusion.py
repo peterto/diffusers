@@ -1,28 +1,30 @@
 """
-    modeled after the textual_inversion.py / train_dreambooth.py and the work
-    of justinpinkney here: https://github.com/justinpinkney/stable-diffusion/blob/main/notebooks/imagic.ipynb
+modeled after the textual_inversion.py / train_dreambooth.py and the work
+of justinpinkney here: https://github.com/justinpinkney/stable-diffusion/blob/main/notebooks/imagic.ipynb
 """
+
 import inspect
 import warnings
 from typing import List, Optional, Union
 
 import numpy as np
+import PIL.Image
 import torch
 import torch.nn.functional as F
-
-import PIL
 from accelerate import Accelerator
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.pipeline_utils import DiffusionPipeline
-from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
-from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
-from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
-from diffusers.utils import deprecate, logging
 
 # TODO: remove and import from diffusers.utils when the new version of diffusers is released
 from packaging import version
 from tqdm.auto import tqdm
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer
+
+from diffusers import DiffusionPipeline
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
+from diffusers.pipelines.pipeline_utils import StableDiffusionMixin
+from diffusers.pipelines.stable_diffusion import StableDiffusionPipelineOutput
+from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
+from diffusers.utils import logging
 
 
 if version.parse(version.parse(PIL.__version__).base_version) >= version.parse("9.1.0"):
@@ -48,7 +50,7 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 def preprocess(image):
     w, h = image.size
-    w, h = map(lambda x: x - x % 32, (w, h))  # resize to integer multiple of 32
+    w, h = (x - x % 32 for x in (w, h))  # resize to integer multiple of 32
     image = image.resize((w, h), resample=PIL_INTERPOLATION["lanczos"])
     image = np.array(image).astype(np.float32) / 255.0
     image = image[None].transpose(0, 3, 1, 2)
@@ -56,7 +58,7 @@ def preprocess(image):
     return 2.0 * image - 1.0
 
 
-class ImagicStableDiffusionPipeline(DiffusionPipeline):
+class ImagicStableDiffusionPipeline(DiffusionPipeline, StableDiffusionMixin):
     r"""
     Pipeline for imagic image editing.
     See paper here: https://arxiv.org/pdf/2210.09276.pdf
@@ -80,7 +82,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         safety_checker ([`StableDiffusionSafetyChecker`]):
             Classification module that estimates whether generated images could be considered offsensive or harmful.
             Please, refer to the [model card](https://huggingface.co/CompVis/stable-diffusion-v1-4) for details.
-        feature_extractor ([`CLIPFeatureExtractor`]):
+        feature_extractor ([`CLIPImageProcessor`]):
             Model that extracts features from generated images to be used as inputs for the `safety_checker`.
     """
 
@@ -92,7 +94,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         unet: UNet2DConditionModel,
         scheduler: Union[DDIMScheduler, PNDMScheduler, LMSDiscreteScheduler],
         safety_checker: StableDiffusionSafetyChecker,
-        feature_extractor: CLIPFeatureExtractor,
+        feature_extractor: CLIPImageProcessor,
     ):
         super().__init__()
         self.register_modules(
@@ -105,35 +107,10 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
 
-    def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
-        r"""
-        Enable sliced attention computation.
-        When this option is enabled, the attention module will split the input tensor in slices, to compute attention
-        in several steps. This is useful to save some memory in exchange for a small speed decrease.
-        Args:
-            slice_size (`str` or `int`, *optional*, defaults to `"auto"`):
-                When `"auto"`, halves the input to the attention heads, so attention will be computed in two steps. If
-                a number is provided, uses as many slices as `attention_head_dim // slice_size`. In this case,
-                `attention_head_dim` must be a multiple of `slice_size`.
-        """
-        if slice_size == "auto":
-            # half the attention head size is usually a good trade-off between
-            # speed and memory
-            slice_size = self.unet.config.attention_head_dim // 2
-        self.unet.set_attention_slice(slice_size)
-
-    def disable_attention_slicing(self):
-        r"""
-        Disable sliced attention computation. If `enable_attention_slicing` was previously invoked, this method will go
-        back to computing attention in one step.
-        """
-        # set slice_size = `None` to disable `attention slicing`
-        self.enable_attention_slicing(None)
-
     def train(
         self,
         prompt: Union[str, List[str]],
-        image: Union[torch.FloatTensor, PIL.Image.Image],
+        image: Union[torch.Tensor, PIL.Image.Image],
         height: Optional[int] = 512,
         width: Optional[int] = 512,
         generator: Optional[torch.Generator] = None,
@@ -167,7 +144,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             generator (`torch.Generator`, *optional*):
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
-            latents (`torch.FloatTensor`, *optional*):
+            latents (`torch.Tensor`, *optional*):
                 Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
                 generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
                 tensor will ge generated by sampling using the supplied random `generator`.
@@ -184,10 +161,6 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             list of `bool`s denoting whether the corresponding generated image likely represents "not-safe-for-work"
             (nsfw) content, according to the `safety_checker`.
         """
-        message = "Please use `image` instead of `init_image`."
-        init_image = deprecate("init_image", "0.13.0", message, take_from=kwargs)
-        image = init_image or image
-
         accelerator = Accelerator(
             gradient_accumulation_steps=1,
             mixed_precision="fp16",
@@ -229,7 +202,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             prompt,
             padding="max_length",
             max_length=self.tokenizer.model_max_length,
-            truncaton=True,
+            truncation=True,
             return_tensors="pt",
         )
         text_embeddings = torch.nn.Parameter(
@@ -346,13 +319,13 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         return_dict: bool = True,
         guidance_scale: float = 7.5,
         eta: float = 0.0,
-        **kwargs,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
         Args:
-            prompt (`str` or `List[str]`):
-                The prompt or prompts to guide the image generation.
+            alpha (`float`, *optional*, defaults to 1.2):
+                The interpolation factor between the original and optimized text embeddings. A value closer to 0
+                will resemble the original input image.
             height (`int`, *optional*, defaults to 512):
                 The height in pixels of the generated image.
             width (`int`, *optional*, defaults to 512):
@@ -366,22 +339,18 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                 Paper](https://arxiv.org/pdf/2205.11487.pdf). Guidance scale is enabled by setting `guidance_scale >
                 1`. Higher guidance scale encourages to generate images that are closely linked to the text `prompt`,
                 usually at the expense of lower image quality.
-            eta (`float`, *optional*, defaults to 0.0):
-                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
-                [`schedulers.DDIMScheduler`], will be ignored for others.
             generator (`torch.Generator`, *optional*):
                 A [torch generator](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make generation
                 deterministic.
-            latents (`torch.FloatTensor`, *optional*):
-                Pre-generated noisy latents, sampled from a Gaussian distribution, to be used as inputs for image
-                generation. Can be used to tweak the same generation with different prompts. If not provided, a latents
-                tensor will ge generated by sampling using the supplied random `generator`.
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `nd.array`.
             return_dict (`bool`, *optional*, defaults to `True`):
                 Whether or not to return a [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] instead of a
                 plain tuple.
+            eta (`float`, *optional*, defaults to 0.0):
+                Corresponds to parameter eta (η) in the DDIM paper: https://arxiv.org/abs/2010.02502. Only applies to
+                [`schedulers.DDIMScheduler`], will be ignored for others.
         Returns:
             [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] or `tuple`:
             [`~pipelines.stable_diffusion.StableDiffusionPipelineOutput`] if `return_dict` is True, otherwise a `tuple.
@@ -429,7 +398,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         # Unlike in other pipelines, latents need to be generated in the target device
         # for 1-to-1 results reproducibility with the CompVis implementation.
         # However this currently doesn't work in `mps`.
-        latents_shape = (1, self.unet.in_channels, height // 8, width // 8)
+        latents_shape = (1, self.unet.config.in_channels, height // 8, width // 8)
         latents_dtype = text_embeddings.dtype
         if self.device.type == "mps":
             # randn does not exist on mps
@@ -479,7 +448,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
 
         image = (image / 2 + 0.5).clamp(0, 1)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         image = image.cpu().permute(0, 2, 3, 1).float().numpy()
 
         if self.safety_checker is not None:

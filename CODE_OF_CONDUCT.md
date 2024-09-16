@@ -7,7 +7,7 @@ We as members, contributors, and leaders pledge to make participation in our
 community a harassment-free experience for everyone, regardless of age, body
 size, visible or invisible disability, ethnicity, sex characteristics, gender
 identity and expression, level of experience, education, socio-economic status,
-nationality, personal appearance, race, religion, or sexual identity
+nationality, personal appearance, race, caste, color, religion, or sexual identity
 and orientation.
 
 We pledge to act and interact in ways that contribute to an open, welcoming,
@@ -24,7 +24,7 @@ community include:
 * Accepting responsibility and apologizing to those affected by our mistakes,
   and learning from the experience
 * Focusing on what is best not just for us as individuals, but for the
-  overall community
+  overall Diffusers community
 
 Examples of unacceptable behavior include:
 
@@ -34,6 +34,7 @@ Examples of unacceptable behavior include:
 * Public or private harassment
 * Publishing others' private information, such as a physical or email
   address, without their explicit permission
+* Spamming issues or PRs with links to projects unrelated to this library
 * Other conduct which could reasonably be considered inappropriate in a
   professional setting
 
@@ -116,8 +117,8 @@ the community.
 ## Attribution
 
 This Code of Conduct is adapted from the [Contributor Covenant][homepage],
-version 2.0, available at
-https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
+version 2.1, available at
+https://www.contributor-covenant.org/version/2/1/code_of_conduct.html.
 
 Community Impact Guidelines were inspired by [Mozilla's code of conduct
 enforcement ladder](https://github.com/mozilla/diversity).

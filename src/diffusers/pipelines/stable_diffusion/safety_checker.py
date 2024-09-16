@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2024 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
 from transformers import CLIPConfig, CLIPVisionModel, PreTrainedModel
 
 from ...utils import logging
@@ -32,6 +31,7 @@ def cosine_distance(image_embeds, text_embeds):
 
 class StableDiffusionSafetyChecker(PreTrainedModel):
     config_class = CLIPConfig
+    main_input_name = "clip_input"
 
     _no_split_modules = ["CLIPEncoderLayer"]
 
@@ -52,7 +52,7 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
         pooled_output = self.vision_model(clip_input)[1]  # pooled_output
         image_embeds = self.visual_projection(pooled_output)
 
-        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloa16
+        # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         special_cos_dist = cosine_distance(image_embeds, self.special_care_embeds).cpu().float().numpy()
         cos_dist = cosine_distance(image_embeds, self.concept_embeds).cpu().float().numpy()
 
@@ -86,7 +86,10 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
 
         for idx, has_nsfw_concept in enumerate(has_nsfw_concepts):
             if has_nsfw_concept:
-                images[idx] = np.zeros(images[idx].shape)  # black image
+                if torch.is_tensor(images) or torch.is_tensor(images[0]):
+                    images[idx] = torch.zeros_like(images[idx])  # black image
+                else:
+                    images[idx] = np.zeros(images[idx].shape)  # black image
 
         if any(has_nsfw_concepts):
             logger.warning(
@@ -97,7 +100,7 @@ class StableDiffusionSafetyChecker(PreTrainedModel):
         return images, has_nsfw_concepts
 
     @torch.no_grad()
-    def forward_onnx(self, clip_input: torch.FloatTensor, images: torch.FloatTensor):
+    def forward_onnx(self, clip_input: torch.Tensor, images: torch.Tensor):
         pooled_output = self.vision_model(clip_input)[1]  # pooled_output
         image_embeds = self.visual_projection(pooled_output)
 

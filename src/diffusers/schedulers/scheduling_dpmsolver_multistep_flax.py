@@ -1,4 +1,4 @@
-# Copyright 2022 TSAIL Team and The HuggingFace Team. All rights reserved.
+# Copyright 2024 TSAIL Team and The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,10 +22,9 @@ import jax
 import jax.numpy as jnp
 
 from ..configuration_utils import ConfigMixin, register_to_config
-from ..utils import deprecate
 from .scheduling_utils_flax import (
-    _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS,
     CommonSchedulerState,
+    FlaxKarrasDiffusionSchedulers,
     FlaxSchedulerMixin,
     FlaxSchedulerOutput,
     add_noise_common,
@@ -136,12 +135,14 @@ class FlaxDPMSolverMultistepScheduler(FlaxSchedulerMixin, ConfigMixin):
         lower_order_final (`bool`, default `True`):
             whether to use lower-order solvers in the final steps. Only valid for < 15 inference steps. We empirically
             find this trick can stabilize the sampling of DPM-Solver for steps < 15, especially for steps <= 10.
+        timestep_spacing (`str`, defaults to `"linspace"`):
+            The way the timesteps should be scaled. Refer to Table 2 of the [Common Diffusion Noise Schedules and
+            Sample Steps are Flawed](https://huggingface.co/papers/2305.08891) for more information.
         dtype (`jnp.dtype`, *optional*, defaults to `jnp.float32`):
             the `dtype` used for params and computation.
     """
 
-    _compatibles = _FLAX_COMPATIBLE_STABLE_DIFFUSION_SCHEDULERS.copy()
-    _deprecated_kwargs = ["predict_epsilon"]
+    _compatibles = [e.name for e in FlaxKarrasDiffusionSchedulers]
 
     dtype: jnp.dtype
 
@@ -165,17 +166,9 @@ class FlaxDPMSolverMultistepScheduler(FlaxSchedulerMixin, ConfigMixin):
         algorithm_type: str = "dpmsolver++",
         solver_type: str = "midpoint",
         lower_order_final: bool = True,
+        timestep_spacing: str = "linspace",
         dtype: jnp.dtype = jnp.float32,
-        **kwargs,
     ):
-        message = (
-            "Please make sure to instantiate your scheduler with `prediction_type` instead. E.g. `scheduler ="
-            f" {self.__class__.__name__}.from_pretrained(<model_id>, prediction_type='epsilon')`."
-        )
-        predict_epsilon = deprecate("predict_epsilon", "0.13.0", message, take_from=kwargs)
-        if predict_epsilon is not None:
-            self.register_to_config(prediction_type="epsilon" if predict_epsilon else "sample")
-
         self.dtype = dtype
 
     def create_state(self, common: Optional[CommonSchedulerState] = None) -> DPMSolverMultistepSchedulerState:
@@ -189,9 +182,9 @@ class FlaxDPMSolverMultistepScheduler(FlaxSchedulerMixin, ConfigMixin):
 
         # settings for DPM-Solver
         if self.config.algorithm_type not in ["dpmsolver", "dpmsolver++"]:
-            raise NotImplementedError(f"{self.config.algorithm_type} does is not implemented for {self.__class__}")
+            raise NotImplementedError(f"{self.config.algorithm_type} is not implemented for {self.__class__}")
         if self.config.solver_type not in ["midpoint", "heun"]:
-            raise NotImplementedError(f"{self.config.solver_type} does is not implemented for {self.__class__}")
+            raise NotImplementedError(f"{self.config.solver_type} is not implemented for {self.__class__}")
 
         # standard deviation of the initial noise distribution
         init_noise_sigma = jnp.array(1.0, dtype=self.dtype)
@@ -221,12 +214,29 @@ class FlaxDPMSolverMultistepScheduler(FlaxSchedulerMixin, ConfigMixin):
             shape (`Tuple`):
                 the shape of the samples to be generated.
         """
-
-        timesteps = (
-            jnp.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps + 1)
-            .round()[::-1][:-1]
-            .astype(jnp.int32)
-        )
+        last_timestep = self.config.num_train_timesteps
+        if self.config.timestep_spacing == "linspace":
+            timesteps = (
+                jnp.linspace(0, last_timestep - 1, num_inference_steps + 1).round()[::-1][:-1].astype(jnp.int32)
+            )
+        elif self.config.timestep_spacing == "leading":
+            step_ratio = last_timestep // (num_inference_steps + 1)
+            # creates integer timesteps by multiplying by ratio
+            # casting to int to avoid issues when num_inference_step is power of 3
+            timesteps = (
+                (jnp.arange(0, num_inference_steps + 1) * step_ratio).round()[::-1][:-1].copy().astype(jnp.int32)
+            )
+            timesteps += self.config.steps_offset
+        elif self.config.timestep_spacing == "trailing":
+            step_ratio = self.config.num_train_timesteps / num_inference_steps
+            # creates integer timesteps by multiplying by ratio
+            # casting to int to avoid issues when num_inference_step is power of 3
+            timesteps = jnp.arange(last_timestep, 0, -step_ratio).round().copy().astype(jnp.int32)
+            timesteps -= 1
+        else:
+            raise ValueError(
+                f"{self.config.timestep_spacing} is not supported. Please make sure to choose one of 'linspace', 'leading' or 'trailing'."
+            )
 
         # initial running values
 
